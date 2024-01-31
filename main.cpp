@@ -1,28 +1,32 @@
-
 #include "stdio.h"
 #include "iostream"
 #include "time.h"
 #include "math.h"
 
+#include <fstream>
+#include <string>
+#include <filesystem>
+#include <ctime>
+#include <chrono>
+
 #include <QDebug>
 #include <QThread>
-
 #include "IMD2000_radarAPI_if.h"
 #include "IMD2000_radarAPI_structs.h"
 #include "IMD2000_radarAPI_enums.h"
 
-//#define READ_ONLY_FUNCTIONS     /* uncomment to write default vlaues */
-
-#define IMD200_COMPORT      (5)
+#define IMD2000_COMPORT      (5)   // edit this port to your corresponding com port
 #define IMD2000_ADDRESS     (100)
-#define IMD2000_TIMEOUT     (150)
+#define IMD2000_TIMEOUT     (250)
 
-//#define SET_DEFAULT_APP_SETTING
-//#define RESET_SENSOR
+/************** SET AMOUNT OF CYCLES FOR TIMING TEST **************/
+#define IMD2000_TIMINGTEST_CYCLES   (500) // 600 cycles correspond to 1 minute with an update rate of 100ms
+
 
 int main(void)
 {
-    printf("example project started\n\n");
+    auto startTime = std::chrono::high_resolution_clock::now();
+    printf("example project for timing test started\n\n");
 
     /************** CHECK API VERSION **************/
     IMD2000Handle_t handle;
@@ -41,11 +45,11 @@ int main(void)
 
     /************** CONNECT DEVICE **************/
     /* Init serial port */
-    uint8_t port = IMD200_COMPORT;
+    uint8_t port = IMD2000_COMPORT;
     #ifndef __linux__
         res = IMD2000_initComPort(&handle,port,IMD2000_BAUDRATE_256000);
     #else
-        res = IMD2000_initComPort(&handle,"/dev/ttyUSB0",MDR_BAUDRATE_256000);
+        res = IMD2000_initComPort(&handle,"/dev/ttyUSB0",IMD2000_BAUDRATE_256000);
     #endif
     if(res != IMD2000_API_ERR_OK){
             qDebug() << "IMD2000_initComPort failed";
@@ -108,317 +112,117 @@ int main(void)
     QThread::msleep(100);
 
 
-    /************** GET TARGET LIST **************/
+    /************** GET TARGET LIST AND PERFORM TIMING TEST **************/
     /* Start Acquisition -> make sure sensor is in acquisition mode */
     res = IMD2000_StartAcquisition(handle,IMD2000_ADDRESS,IMD2000_TIMEOUT);
     if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_StopAcquisition failed error: " <<res;
+        qDebug() << "IMD2000_StartAcquisition failed error: " <<res;
         return res;
     }else{
-        qDebug() << "IMD2000_StopAcquisition successful";
+        qDebug() << "IMD2000_StartAcquisition successful";
     }
     QThread::msleep(200);
 
     IMD2000_TargetList_t *p_targetList = new IMD2000_TargetList_t;
-    memset((void*)p_targetList, 0, sizeof (IMD2000_TargetList_t));
-    res = IMD2000_getTargetList(handle,p_targetList,IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getTargetList failed";
-        qDebug() << "error: " <<res;
+    QElapsedTimer timingTest_time;
+    uint32_t timingTest_current = 0;
+    uint32_t timingTest_sum = 0;
+    uint16_t i_timingTest = 0;
+    uint16_t timingTest_targetlist_errors = 0;
+    uint16_t timingTest_targetlist_id_dropframe_last = 0;
+    uint16_t i_timingTest_targetlist_id_dropframe_result = 0;
+
+    qDebug() << "\n-----BEGIN TIMING TEST FOR" << IMD2000_TIMINGTEST_CYCLES << "CYCLES WITH TIMEOUT OF" << IMD2000_TIMEOUT << "ms-----\n";
+
+
+    std::ofstream csvFile("C:\\Users\\VINAY AGRAWAL\\Desktop\\Working RADAR\\IMD-2000_Software_Package\\IMD-2000_RadarAPI\\IMD2000_ExampleProject_timing_test\\target_data.csv", std::ios::out | std::ios::trunc);
+
+    if (!csvFile.is_open()) {
+        qDebug() << "Failed to open CSV file for writing!";
         return 0;
-    }else{
-        qDebug() << "IMD2000_getTargetList success";
     }
+
+
+    csvFile << "Timestamp (ms),TargetIndex (Tid),Range (m),Velocity (m/s),Direction,Signal (dB),Estimated Time of Arrival (s)\n";
+
+    // std::time_t lastTimestamp = -1;
+
+
+
+    for(i_timingTest = 0; i_timingTest < IMD2000_TIMINGTEST_CYCLES; ++i_timingTest){
+        timingTest_targetlist_id_dropframe_last = p_targetList->ui16_targetListId;
+        memset((void*)p_targetList, 0, sizeof (IMD2000_TargetList_t));
+        timingTest_time.start();
+
+
+        res = IMD2000_getTargetList(handle,p_targetList,IMD2000_ADDRESS,IMD2000_TIMEOUT);
+        if(res != IMD2000_API_ERR_OK){
+            qDebug() << "IMD2000_getTargetList failed";
+            qDebug() << "error: " <<res;
+            timingTest_targetlist_errors += 1;
+        }else{
+            timingTest_current = timingTest_time.elapsed();
+            timingTest_sum += timingTest_current;
+            if(p_targetList->ui16_targetListId - timingTest_targetlist_id_dropframe_last > 1){
+                i_timingTest_targetlist_id_dropframe_result++;
+            }
+
+            qDebug() << "IMD2000_getTargetList success - latency for current cycle:" << timingTest_current << "ms - current cycle:" << i_timingTest << " - target list ID:" << p_targetList->ui16_targetListId;
+
+            // Print velocity and range for each target in the list
+            for (uint16_t targetIndex = 0; targetIndex < p_targetList->ui16_nrOfTargets; ++targetIndex) {
+                IMD2000_Target_t target = p_targetList->target[targetIndex];
+
+                auto elapsedMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - startTime).count();
+
+                qDebug() << "Target" << targetIndex + 1 << ":";
+                qDebug() << "Range: " << target.f32_range_m << "m";
+                qDebug() << "Velocity: " << target.f32_velocity_mps << "m/s";
+                qDebug() << "Signal dB: " << target.f32_signal_dB << "dB";
+                qDebug() << "Estimated Time of Arrival: " << target.f32_estimatedTimeOfArrival_s << "s";
+
+
+
+                if (targetIndex != 0) {
+                    // Print an empty timestamp
+                    csvFile << ",";
+                } else {
+                    // Print the timestamp for the first target with a new timestamp
+                    csvFile << elapsedMilliseconds << ",";
+                }
+                csvFile << targetIndex + 1 << ","; // TargetIndex
+                csvFile << target.f32_range_m << ","; // Range (m)
+                csvFile << target.f32_velocity_mps << ","; // Velocity (m/s)
+                if(target.f32_velocity_mps > 0)
+                    csvFile << "Towards the RADAR" << ",";
+                else
+                    csvFile << "Away from the RADAR" << ",";
+                csvFile << target.f32_signal_dB << ","; // Signal dB
+                csvFile << target.f32_estimatedTimeOfArrival_s << "\n"; // Estimated Time of Arrival (s)
+
+            }
+
+
+            qDebug() << "-----------------------------------------------------------";
+        }
+    }
+
+    csvFile.close();
     delete p_targetList;
-    QThread::msleep(50);
+    qDebug() << "\n-----END OF TIMING TEST-----\n";
 
-    /************** GET APPLICATION SETTING **************/
-    /* get velocity lower bound */
-    float32_t velocityMin_f32;
-    res = IMD2000_getVelocityLowerBound(handle, &velocityMin_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getVelocityLowerBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_getVelocityLowerBound successful; velocity lower bound =" << velocityMin_f32;
-    }
-    QThread::msleep(50);
+    /* Calculate mean latency for transmission over IMD2000_TIMINGTEST_CYCLES */
+    qDebug() << "\n-----RESULTS-----";
+    qDebug() << "ProductInfo:" << productInfo_ui16;
+    qDebug() << "ApiVersion - " << QString::number(static_cast<double>(version),'f',3);
+    qDebug() << "SerialNumber :" << serialNumber_u32;
+    qDebug() << "FirmwareVersion - major:" << major << " minor:" << minor;
+    qDebug() << "Average transmission latency over" << IMD2000_TIMINGTEST_CYCLES << "cycles:" << (timingTest_sum / IMD2000_TIMINGTEST_CYCLES) << "ms";
+    qDebug() << "Amount of target list errors:" << timingTest_targetlist_errors << "errors";
+    qDebug() << "Amount of drop frames:" << i_timingTest_targetlist_id_dropframe_result - 1 << "frames";
+    qDebug() << "Test parameters: Timeout:" << IMD2000_TIMEOUT << "ms - cycles:" << IMD2000_TIMINGTEST_CYCLES;
+    qDebug() << "-----RESULTS END-----\n";
 
-    /* get velocity upper bound */
-    float32_t velocityMax_f32;
-    res = IMD2000_getVelocityUpperBound(handle, &velocityMax_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getVelocityUpperBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_getVelocityUpperBound successful; velocity upper bound =" << velocityMax_f32;
-    }
-    QThread::msleep(50);
-
-    /* get range lower bound */
-    float32_t rangeMin_f32;
-    res = IMD2000_getRangeLowerBound(handle, &rangeMin_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getRangeLowerBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_getRangeLowerBound successful; range lower bound =" << rangeMin_f32;
-    }
-    QThread::msleep(50);
-
-    /* get range upper bound */
-    float32_t rangeMax_f32;
-    res = IMD2000_getRangeUpperBound(handle, &rangeMax_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getRangeUpperBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_getRangeUpperBound successful; range upper bound =" << rangeMax_f32;
-    }
-    QThread::msleep(50);
-
-
-    /* get signal magnitude lower bound */
-    float32_t signalMagMin_f32;
-    res = IMD2000_getSignalMagnitudeLowerBound(handle, &signalMagMin_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getSignalMagnitudeLowerBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_getSignalMagnitudeLowerBound successful; signal magnitude lower bound =" << signalMagMin_f32;
-    }
-    QThread::msleep(50);
-
-
-    /* get signal magnitude upper bound */
-    float32_t signalMagMax_f32;
-    res = IMD2000_getSignalMagnitudeUpperBound(handle, &signalMagMax_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getSignalMagnitudeUpperBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_getSignalMagnitudeUpperBound successful; signal magnitude upper bound =" << signalMagMax_f32;
-    }
-    QThread::msleep(50);
-
-
-    /* get detetion threshold beta */
-    float32_t detectionThreshold_f32;
-    res = IMD2000_getDetectionThresholdBeta(handle, &detectionThreshold_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getDetectionThresholdBeta failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_getDetectionThresholdBeta successful; detection threshold beta =" << detectionThreshold_f32;
-    }
-    QThread::msleep(50);
-
-    /* get false alarm suppresion status */
-    uint16_t falseAlarmSuppression_ui16;
-    res = IMD2000_getFalseAlarmSuppression(handle, &falseAlarmSuppression_ui16, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getFalseAlarmSuppression failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_getFalseAlarmSuppression successful; false alarm suppression Enable =" << falseAlarmSuppression_ui16;
-    }
-    QThread::msleep(50);
-
-    /* get frequency channel */
-    uint16_t frequencyChannelGet_ui16 = 0u;
-    res = IMD2000_getFrequencyChannel(handle,&frequencyChannelGet_ui16,IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_getFrequencyChannel failed; error: " << res;
-        return res;
-    }else{
-        qDebug() << "IMD2000_getFrequencyChannel successful; frequency channel =" << frequencyChannelGet_ui16;
-    }
-    QThread::msleep(50);
-
-
-    /************** SET APPLICATION SETTING **************/
-    /* set velocity lower bound */
-    float32_t velocityMinSet_f32 = -7.1f;
-    res = IMD2000_setVelocityLowerBound(handle, velocityMinSet_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setVelocityLowerBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_setVelocityLowerBound successful";
-    }
-    QThread::msleep(50);
-
-
-    /* set velocity upper bound */
-    float32_t velocityMaxSet_f32 = 7.1f;
-    res = IMD2000_setVelocityUpperBound(handle, velocityMaxSet_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setVelocityUpperBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_setVelocityUpperBound successful";
-    }
-    QThread::msleep(50);
-
-
-    /* set range lower bound */
-    float32_t rangeMinSet_f32 = 0.6f;
-    res = IMD2000_setRangeLowerBound(handle, rangeMinSet_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setRangeLowerBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_setRangeLowerBound successful";
-    }
-    QThread::msleep(50);
-
-
-    /* set range upper bound */
-    float32_t rangeMaxSet_f32 = 19.9f;
-    res = IMD2000_setRangeUpperBound(handle, rangeMaxSet_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setRangeUpperBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_setRangeUpperBound successful";
-    }
-    QThread::msleep(50);
-
-
-    /* set signal magnitude lower bound */
-    float32_t signalMagMinSet_f32 = 20.0f;
-    res = IMD2000_setSignalMagnitudeLowerBound(handle, signalMagMinSet_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setSignalMagnitudeLowerBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_setSignalMagnitudeLowerBound successful";
-    }
-    QThread::msleep(50);
-
-
-    /* set signal magnitude upper bound */
-    float32_t signalMagMaxSet_f32 = 99.0f;
-    res = IMD2000_setSignalMagnitudeUpperBound(handle, signalMagMaxSet_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setSignalMagnitudeUpperBound failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_setSignalMagnitudeUpperBound successful";
-    }
-    QThread::msleep(50);
-
-
-    /* set detection threshold beta */
-    float32_t detectionThresholdSet_f32 = 0.5f;
-    res = IMD2000_setDetectionThresholdBeta(handle, detectionThresholdSet_f32, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setDetectionThresholdBeta failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_setDetectionThresholdBeta successful";
-    }
-    QThread::msleep(50);
-
-
-    /* set false alarm suppression */
-    uint16_t falseAlarmSuppressionSet_ui16 = 0;
-    res = IMD2000_setFalseAlarmSuppression(handle, falseAlarmSuppressionSet_ui16, IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setFalseAlarmSuppression failed; error: " << res;
-        return res;
-    }
-    else
-    {
-        qDebug() << "IMD2000_setFalseAlarmSuppression successful";
-    }
-    QThread::msleep(50);
-
-    /* set frequency channel */
-    uint16_t frequencyChannelSet_ui16 = 1;
-    res = IMD2000_setFrequencyChannel(handle,frequencyChannelSet_ui16,IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setFrequencyChannel failed; error: " << res;
-        return res;
-    }else{
-        qDebug() << "IMD2000_setFrequencyChannel successful";
-    }
-    QThread::msleep(100);
-
-
-    /************** SET DEFAULT APPLICATION SETTING **************/
-#ifdef SET_DEFAULT_APP_SETTING
-    res = IMD2000_setDefaultAppSetting(handle, 0, IMD2000_ADDRESS, IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_setDefaultSetting - failed: error = " << res;
-    }else{
-        qDebug() << "IMD2000_setDefaultSetting - successful";
-    }
-    QThread::msleep(100);
-#endif
-
-    /************** WRITE SETTING BUFFER TO EEPROM MEMORY **************/
-    /* Stop acquisition */
-    res = IMD2000_StopAcquisition(handle,IMD2000_ADDRESS,IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_StopAcquisition failed error: " <<res;
-        return res;
-    }else{
-        qDebug() << "IMD2000_StopAcquisition successful";
-    }
-    QThread::msleep(100);
-
-    /* write bufer to eeprom */
-    uint8_t success = 255u;
-    res = IMD2000_EEPROM_WriteBufferToFlash(handle, &success, IMD2000_ADDRESS, IMD2000_TIMEOUT);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_EEPROM_WriteBufferToFlash - failed: error = " << res;
-    }else{
-        qDebug() << "IMD2000_EEPROM_WriteBufferToFlash - successful: " << success;
-    }
-    QThread::msleep(100);
-
-#ifdef RESET_SENSOR
-    /************** RESET SENSOR **************/
-    res = IMD2000_resetSensor(handle,IMD2000_ADDRESS);
-    if(res != IMD2000_API_ERR_OK){
-        qDebug() << "IMD2000_resetSensor failed; error: " << res;
-        return res;
-    }else{
-        qDebug() << "IMD2000_resetSensor successful";
-    }
-    QThread::msleep(3000);
-#endif
 
 
     /************** EXIT DEVICE **************/
@@ -427,7 +231,7 @@ int main(void)
     if(res != IMD2000_API_ERR_OK){
         return 0;
     }else{
-        qDebug() << "IMD2000_exitSystem - successfull";
+        qDebug() << "IMD2000_exitSystem - successful";
     }
     QThread::msleep(50);
 
@@ -436,39 +240,13 @@ int main(void)
     if(res != IMD2000_API_ERR_OK){
         return 0;
     }else{
-        qDebug() << "IMD2000_exitComPort - successfull";
+        qDebug() << "IMD2000_exitComPort - successful";
     }
     QThread::msleep(50);
 
     /************** Example project finished **************/
-    printf("example project finished\n\n");
+    printf("example project for timing test finished\n\n");
 
+    system("pause"); // prevent application  from closing automatically
     return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

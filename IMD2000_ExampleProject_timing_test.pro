@@ -1,5 +1,5 @@
 
-
+#build with Qt 5.14.2 - MinGW 7.3.0
 
 QT -= gui
 
